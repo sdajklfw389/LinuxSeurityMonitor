@@ -6,7 +6,7 @@ using namespace std;
 void CallBack(event_t event)
 {
     // Process the event
-    std::cout << "Event: " << event.name << " " << event.data << std::endl;
+    std::cout << "Event: " << event.pid << " " << event.uid << " " << event.comm << std::endl;
 }
 
 extern "C"

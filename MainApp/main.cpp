@@ -1,20 +1,32 @@
-// Main app is to dispatch the events to the plugins.
-
-#include "../Interface.h"
+#include <cstring>
+#include <cstddef>
 #include <vector>
-#include <dlfcn.h>
 #include <iostream>
+
+static_assert(::memcmp != nullptr, "2: memcmp not in global namespace");
+
+
+// System headers
+#include <dlfcn.h>
+#include <linux/perf_event.h>
+#include <bpf/libbpf.h>
+#include <bpf/bpf.h>
+
+// Your project headers
+#include "../Interface.h"
 
 using namespace std;
 
 std::vector<event_callback_t> event_callbacks;
 
-void DispatchEvents()
+static void HandleEvent(void *ctx, int cpu, void *data, __u32 size)
 {
-    cout << "beging to dispatch events" << endl;
+    std::cout << "Event received! Size: " << size << std::endl;
+    const event_t* event = static_cast<const event_t*>(data);
+    // Dispatch to plugins
     for (auto& callback : event_callbacks)
     {
-        callback(event_t{ "event_name", "event_data" });
+        callback(*event);
     }
 }
 
@@ -69,9 +81,54 @@ int main()
     if (LoadPlugins() == 0)
     {
         cout << "LoadPlugins success" << endl;
-        // Dispatch the events to the plugins
-        // Later should be triggered by the ebpf.
-        DispatchEvents();
+        // Open and load ebpf program
+        struct bpf_object *obj = bpf_object__open("probe.bpf.o");
+        if (!obj)
+        {
+            std::cerr << "Failed to open ebpf program" << std::endl;
+            return -1;
+        }
+
+        std::cout << "Successfully opened BPF object" << std::endl;
+        // Load the ebpf program
+        if (bpf_object__load(obj))
+        {
+            std::cerr << "Failed to load ebpf program" << std::endl;
+            return -1;
+        }
+        std::cout << "Successfully loaded ebpf program" << std::endl;
+
+        // After loading the BPF object
+        struct bpf_program *prog = bpf_object__find_program_by_name(obj, "trace_execve");
+        if (!prog) {
+            std::cerr << "Failed to find BPF program 'trace_execve'" << std::endl;
+            return -1;
+        }
+        std::cout << "Found BPF program" << std::endl;
+
+        // Attach the program to the tracepoint
+        struct bpf_link *link = bpf_program__attach(prog);
+        if (!link) {
+            std::cerr << "Failed to attach BPF program: " << errno << std::endl;
+            return -1;
+        }
+        std::cout << "Successfully attached BPF program to tracepoint" << std::endl;
+
+        // Set up perf buffer to receive events
+        struct perf_buffer *pb = perf_buffer__new(
+            bpf_map__fd(bpf_object__find_map_by_name(obj, "events")),
+            8,  // pages
+            HandleEvent,
+            NULL,  // lost_cb
+            NULL,  // ctx
+            NULL   // opts
+        );
+
+        std::cout << "Successfully set up perf buffer" << std::endl;
+        // Main event loop
+        while (true) {
+            perf_buffer__poll(pb, 100 /* timeout, ms */);
+        }
 
         return 0;
     }
